@@ -1,0 +1,33 @@
+{
+  "editor.minimap.enabled": false,
+  "editor.smoothScrolling": false,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.formatOnSave": false,
+
+  "workbench.startupEditor": "none",
+  "workbench.tree.indent": 8,
+
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/node_modules/**": true,
+    "**/vendor/**": true,
+    "**/.DS_Store": true,
+    "**/wp-admin/**": true,
+    "**/wp-includes/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/vendor": true,
+    "**/wp-admin": true,
+    "**/wp-includes": true
+  },
+
+  "git.autofetch": false,
+  "git.confirmSync": false,
+
+  "intelephense.maxMemory": 1024,
+  "intelephense.environment.phpVersion": "8.2",
+
+  "telemetry.telemetryLevel": "off"
+}
