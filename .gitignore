@@ -1,0 +1,31 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# PHP / Composer (if you add it later)
+vendor/
+composer.lock
+
+# Node tooling (if you add a build or tests later)
+node_modules/
+dist/
+build/
+.cache/
+*.log
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+
+# Misc
+*.zip
+.env
+.env.*
