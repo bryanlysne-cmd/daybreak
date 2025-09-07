@@ -15,6 +15,7 @@ class Daybreak_App2_Safe {
     return add_query_arg(['dbrk2'=>'record','type'=>$type,'id'=>$id], home_url('/'));
   }
   public function __construct() {
+  add_action('wp_ajax_dbrk2_deal_save', [$this,'ajax_deal_save']);
   add_action('wp_ajax_dbrk2_link_get', [$this,'ajax_link_get']);
   add_action('wp_ajax_dbrk2_link_set', [$this,'ajax_link_set']);
     add_shortcode('daybreak_app2', [$this,'shortcode']);
@@ -82,6 +83,7 @@ class Daybreak_App2_Safe {
       if($type==='deals'){
         $st=wp_get_post_terms($p->ID,'dbrk_stage',['fields'=>'names']);
         $row['stage']=$st?$st[0]:null;
+  $row['amount'] = (float) get_post_meta($p->ID,'dbrk_amount',true);
         $co = intval(get_post_meta($p->ID,'dbrk_company_id',true));
         $pr = intval(get_post_meta($p->ID,'dbrk_property_id',true));
         $row['rel'] = trim(($co? get_the_title($co):'') . ( ($co&&$pr)?' • ':'') . ($pr? get_the_title($pr):''));
@@ -237,6 +239,9 @@ class Daybreak_App2_Safe {
 
   // --- Record Drawer endpoints ---
   public function ajax_item(){
+    if($type==='deals'){
+      $data['amount'] = (float) get_post_meta($id,'dbrk_amount',true);
+    }
     if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
     $type=sanitize_key($_GET['type']??''); $id=intval($_GET['id']??0);
     $pt=$this->pt($type);
@@ -245,6 +250,21 @@ class Daybreak_App2_Safe {
     $data=['id'=>$id,'type'=>$type,'title'=>get_the_title($id)];
     $data['link'] = $this->record_link($type, $id);
     wp_send_json_success($data,200);
+  }
+
+  public function ajax_deal_save(){
+    if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+    $id = intval($_POST['id']??0);
+    if(!$id || get_post_type($id)!=='dbrk_deal') wp_send_json_error(['error'=>'bad_request'],400);
+
+    // amount (USD float)
+    if(isset($_POST['amount'])){
+      $raw = wp_unslash($_POST['amount']);
+      // allow "1,234,567.89" or "1234567" etc.
+      $norm = preg_replace('/[^0-9.\-]/','',$raw);
+      update_post_meta($id,'dbrk_amount', (float)$norm);
+    }
+    wp_send_json_success(['saved'=>true],200);
   }
 
   // Fallback record page renderer
@@ -328,10 +348,25 @@ class Daybreak_App2_Safe {
       const stageSel=document.getElementById('stageSel');
       const stageSave=document.getElementById('stageSave');
 
-      if(type==='deals'){
-        stageCard.style.display='block';
-        fetch('/wp-admin/admin-ajax.php?action=dbrk2_stages')
-          .then(r=>r.json()).then(j=>{
+      if($type==='deals'){
+        $data['amount'] = (float) get_post_meta($id,'dbrk_amount',true);
+      }
+      wp_send_json_success($data,200);
+    }
+
+    public function ajax_deal_save(){
+      if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+      $id = intval($_POST['id']??0);
+      if(!$id || get_post_type($id)!=='dbrk_deal') wp_send_json_error(['error'=>'bad_request'],400);
+
+      // amount (USD float)
+      if(isset($_POST['amount'])){
+        $raw = wp_unslash($_POST['amount']);
+        // allow "1,234,567.89" or "1234567" etc.
+        $norm = preg_replace('/[^0-9.\-]/','',$raw);
+        update_post_meta($id,'dbrk_amount', (float)$norm);
+      }
+      wp_send_json_success(['saved'=>true],200);
             const stages=(j.data&&j.data.stages)||j.stages||[];
             stages.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; stageSel.appendChild(o); });
             // preload current
@@ -614,12 +649,31 @@ class Daybreak_App2_Safe {
           };
         }
   closeDrawer();
-  const wrap=document.createElement('div'); wrap.className='dbrk2-drawer';
-  const bar=document.createElement('div'); bar.className='dbrk2-dbar';
-  const h=document.createElement('div'); h.style.font='600 14px system-ui'; h.textContent=title||('#'+id);
-  const x=document.createElement('button'); x.className='dbrk2-btn'; x.textContent='×'; x.onclick=closeDrawer;
-  const go=document.createElement('a'); go.className='dbrk2-btn'; go.textContent='Open ↗'; go.target='_blank';
-  bar.appendChild(h); bar.insertBefore(go, x); bar.appendChild(x); wrap.appendChild(bar);
+  const wrap = document.createElement('div'); wrap.className = 'dbrk2-drawer';
+  // Header (safe order: title → Open ↗ → ×)
+  const bar = document.createElement('div');
+  bar.className = 'dbrk2-dbar';
+
+  const h = document.createElement('div');
+  h.style.font = '600 14px system-ui';
+  h.textContent = title || ('#'+id);
+
+  const go = document.createElement('a');
+  go.className = 'dbrk2-btn';
+  go.textContent = 'Open ↗';
+  go.target = '_blank';   // href set after item fetch below
+
+  const x = document.createElement('button');
+  x.className = 'dbrk2-btn';
+  x.textContent = '×';
+  x.onclick = closeDrawer;
+
+  // append in sequence (no insertBefore)
+  bar.appendChild(h);
+  bar.appendChild(go);
+  bar.appendChild(x);
+
+  wrap.appendChild(bar);
 
         const body=document.createElement('div'); body.className='dbrk2-dbody'; wrap.appendChild(body);
         document.body.appendChild(wrap);
@@ -789,6 +843,7 @@ class Daybreak_App2_Safe {
         });
 
         items.forEach(d=>{ const s=(d.stage||'').toLowerCase(); const tgt=stages.find(x=>x.toLowerCase()===s) || stages[0]; const lane=lanes[tgt]; const card=document.createElement('div'); card.className='dbrk2-cardd'; card.textContent=d.title; card.draggable=true; card.dataset.id=d.id;
+          card.dataset.amount = (typeof d.amount!=='undefined' && d.amount!==null) ? String(d.amount) : '0';
           const link=document.createElement('a');
           link.href = d.link || ('/?dbrk2=record&type=deals&id='+d.id);
           link.target='_blank';
@@ -804,10 +859,52 @@ class Daybreak_App2_Safe {
 
           // Patch A: update counts after populating cards
           function updateCounts(){
+            function fmtUSD(n){
+              try { return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n||0); }
+              catch(_) { return '$'+Math.round(n||0).toLocaleString(); }
+            }
             stages.forEach(s=>{
-              const n = lanes[s].querySelectorAll('.dbrk2-cardd').length;
-              laneHeaders[s].textContent = `${s} (${n})`;
+              const cards = lanes[s].querySelectorAll('.dbrk2-cardd');
+              let sum = 0;
+              cards.forEach(c=>{ sum += parseFloat(c.dataset.amount||'0')||0; });
+              laneHeaders[s].textContent = `${s} (${cards.length}) — ${fmtUSD(sum)}`;
             });
+        // Deal details (Amount)
+        if(type==='deals'){
+          const dcard=document.createElement('div'); dcard.className='dbrk2-card'; dcard.innerHTML='<h4>Deal Details</h4>';
+          const dbox=document.createElement('div'); dbox.className='dbrk2-box'; dcard.appendChild(dbox); body.appendChild(dcard);
+
+          const row=document.createElement('div'); row.className='dbrk2-row'; dbox.appendChild(row);
+          const lab=document.createElement('div'); lab.textContent='Amount (USD):'; lab.style.width='130px'; row.appendChild(lab);
+          const amt=document.createElement('input'); amt.className='dbrk2-input'; amt.type='text'; amt.placeholder='e.g. 2500000'; row.appendChild(amt);
+          const save=document.createElement('button'); save.className='dbrk2-btn'; save.textContent='Save'; row.appendChild(save);
+
+          // preload
+          amt.value = (item && typeof item.amount!=='undefined' && item.amount!==null) ? String(item.amount) : '';
+
+          save.onclick = async ()=>{
+            const fd=new FormData();
+            fd.append('action','dbrk2_deal_save');
+            fd.append('id', id);
+            fd.append('amount', amt.value||'');
+            await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+            alert('Deal saved ✅');
+          };
+        }
+      // --- Hotkeys ---
+      document.addEventListener('keydown', (e)=>{
+        // "/" focuses top search (and prevents browser quick find)
+        if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          const gs = document.getElementById('dbrk2-gs');
+          if (gs) { e.preventDefault(); gs.focus(); gs.select(); }
+        }
+        // Esc closes drawer and search overlay
+        if (e.key === 'Escape') {
+          closeDrawer && closeDrawer();
+          const ov = document.getElementById('dbrk2-search-ov');
+          if (ov) ov.remove();
+        }
+      });
           }
           updateCounts();
 
@@ -992,7 +1089,9 @@ class Daybreak_App2_Safe {
             out.appendChild(row);
           });
         }
-        const ov=document.createElement('div'); Object.assign(ov.style,{position:'fixed',inset:'0',background:'rgba(0,0,0,.2)',zIndex:'99999'});
+  const ov=document.createElement('div');
+  ov.id='dbrk2-search-ov';
+  Object.assign(ov.style,{position:'fixed',inset:'0',background:'rgba(0,0,0,.2)',zIndex:'99999'});
         ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
         const box=document.createElement('div'); Object.assign(box.style,{position:'absolute',left:'6vw',right:'6vw',top:'10vh',bottom:'10vh',background:'#fff',border:'1px solid #eee',borderRadius:'12px',overflow:'auto',padding:'12px'});
         const bar=document.createElement('div'); bar.style.display='flex'; bar.style.justifyContent='space-between'; bar.style.alignItems='center'; bar.style.marginBottom='8px';
