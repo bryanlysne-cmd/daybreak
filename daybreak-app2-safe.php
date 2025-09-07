@@ -8,10 +8,136 @@ Author: ChatGPT
 if (!defined('ABSPATH')) exit;
 
 class Daybreak_App2_Safe {
+  // PATCH 3: Fetch full item details (server)
+  public function ajax_item_detail(){
+    if (!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+
+    $type = sanitize_key($_GET['type'] ?? '');
+    $id   = intval($_GET['id'] ?? 0);
+    $pt   = $this->dbrk2_pt_for($type);
+
+    if (!$type || !$id || !$pt || get_post_type($id) !== $pt) {
+      wp_send_json_error(['error'=>'bad_request'],400);
+    }
+
+    $data = [
+      'id'      => $id,
+      'type'    => $type,
+      'title'   => get_the_title($id) ?: '(untitled)',
+      'content' => get_post_field('post_content', $id) ?: '',
+      'link'    => $this->dbrk2_record_link($type, $id),
+    ];
+
+    if ($type === 'deals') {
+      $stage_terms = wp_get_post_terms($id, 'dbrk_stage', ['fields'=>'names']);
+      $data['stage']       = $stage_terms ? ($stage_terms[0] ?? '') : '';
+      $data['amount']      = (float) get_post_meta($id,'dbrk_amount',true);
+      $data['company_id']  = (int) get_post_meta($id,'dbrk_company_id',true);
+      $data['property_id'] = (int) get_post_meta($id,'dbrk_property_id',true);
+      $data['contact_id']  = (int) get_post_meta($id,'dbrk_contact_id',true);
+    }
+
+    if ($type === 'tasks') {
+      $data['done']   = (bool) get_post_meta($id,'dbrk_done',true);
+      $data['due_at'] = (string) get_post_meta($id,'dbrk_due_at',true);
+    }
+
+    if (in_array($type, ['contacts','companies','properties'], true)) {
+      $data['email'] = (string) get_post_meta($id,'dbrk_email',true);
+      $data['phone'] = (string) get_post_meta($id,'dbrk_phone',true);
+    }
+
+    wp_send_json_success($data,200);
+  }
+
+  // PATCH 4: Save item changes (server)
+  public function ajax_item_save(){
+    if (!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+
+    $type = sanitize_key($_POST['type'] ?? '');
+    $id   = intval($_POST['id'] ?? 0);
+    $pt   = $this->dbrk2_pt_for($type);
+
+    if (!$type || !$id || !$pt || get_post_type($id) !== $pt) {
+      wp_send_json_error(['error'=>'bad_request'],400);
+    }
+
+    // Optional role gating if available
+    if (method_exists($this,'dbrk2_guard_edit')) {
+      $this->dbrk2_guard_edit($type, $id);
+    }
+
+    // Title / content
+    if (isset($_POST['title'])) {
+      wp_update_post(['ID'=>$id,'post_title'=>sanitize_text_field(wp_unslash($_POST['title']))]);
+    }
+    if (isset($_POST['content'])) {
+      wp_update_post(['ID'=>$id,'post_content'=>wp_kses_post(wp_unslash($_POST['content']))]);
+    }
+
+    // Type-specific
+    if ($type === 'deals') {
+      if (isset($_POST['amount'])) {
+        $norm = preg_replace('/[^0-9.\-]/','', (string) wp_unslash($_POST['amount']));
+        update_post_meta($id,'dbrk_amount', (float)$norm);
+      }
+      if (isset($_POST['stage'])) {
+        $name = sanitize_text_field(wp_unslash($_POST['stage']));
+        if ($name) {
+          $term = get_term_by('name',$name,'dbrk_stage') ?: get_term_by('slug',sanitize_title($name),'dbrk_stage');
+          if (!$term) {
+            $mk = wp_insert_term($name,'dbrk_stage');
+            if (!is_wp_error($mk)) $term = get_term($mk['term_id'],'dbrk_stage');
+          }
+          if ($term && !is_wp_error($term)) {
+            wp_set_object_terms($id, [(int)$term->term_id], 'dbrk_stage', false);
+          }
+        }
+      }
+      foreach (['company_id'=>'dbrk_company_id','property_id'=>'dbrk_property_id','contact_id'=>'dbrk_contact_id'] as $k=>$meta) {
+        if (isset($_POST[$k])) {
+          $val = (int) $_POST[$k];
+          if ($val>0) update_post_meta($id,$meta,$val); else delete_post_meta($id,$meta);
+        }
+      }
+    }
+
+    if ($type === 'tasks') {
+      if (isset($_POST['due_at'])) update_post_meta($id,'dbrk_due_at', sanitize_text_field(wp_unslash($_POST['due_at'])));
+      if (isset($_POST['done']))   update_post_meta($id,'dbrk_done', (int) !!$_POST['done']);
+    }
+
+    if (in_array($type, ['contacts','companies','properties'], true)) {
+      if (isset($_POST['email'])) update_post_meta($id,'dbrk_email', sanitize_text_field(wp_unslash($_POST['email'])));
+      if (isset($_POST['phone'])) update_post_meta($id,'dbrk_phone', sanitize_text_field(wp_unslash($_POST['phone'])));
+    }
+
+    wp_send_json_success(['saved'=>true],200);
+  }
   // Helper to build a canonical or fallback record link
   private function record_link($type,$id){
     $pl = get_permalink($id);
     if ($pl && filter_var($pl, FILTER_VALIDATE_URL)) return $pl;
+    return add_query_arg(['dbrk2'=>'record','type'=>$type,'id'=>$id], home_url('/'));
+  }
+
+  // PATCH 2: Type map helper
+  private function dbrk2_pt_for(string $type): string {
+    $map = [
+      'contacts'  => 'dbrk_contact',
+      'companies' => 'dbrk_company',
+      'properties'=> 'dbrk_property',
+      'deals'     => 'dbrk_deal',
+      'tasks'     => 'dbrk_task',
+      'notes'     => 'dbrk_activity',
+    ];
+    return $map[$type] ?? '';
+  }
+
+  // PATCH 2: Record link helper
+  private function dbrk2_record_link(string $type, int $id): string {
+    $perm = get_permalink($id);
+    if ($perm && is_string($perm)) return $perm;
     return add_query_arg(['dbrk2'=>'record','type'=>$type,'id'=>$id], home_url('/'));
   }
   public function __construct() {
@@ -33,6 +159,10 @@ class Daybreak_App2_Safe {
 
     add_action('wp_ajax_dbrk2_task_add',     [$this,'ajax_task_add']);
     add_action('wp_ajax_dbrk2_task_toggle',  [$this,'ajax_task_toggle']);
+
+  // Drawer Details Editor
+  add_action('wp_ajax_dbrk2_item_detail', [$this,'ajax_item_detail']); // NEW (non-breaking)
+  add_action('wp_ajax_dbrk2_item_save',    [$this,'ajax_item_save']);   // NEW (non-breaking)
 
     add_action('wp_ajax_dbrk2_scratch_get',  [$this,'ajax_scratch_get']);
     add_action('wp_ajax_dbrk2_scratch_set',  [$this,'ajax_scratch_set']);
