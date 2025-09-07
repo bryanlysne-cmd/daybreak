@@ -719,6 +719,104 @@ class Daybreak_App2_Safe {
     (function(){
       function closeDrawer(){ const ex=document.querySelector('.dbrk2-drawer'); if(ex) ex.remove(); }
       async function openDrawer(type,id,title){
+        // --- Details Editor (Title + Description for all; extras by type) ---
+        (async () => {
+          const r  = await fetch('/wp-admin/admin-ajax.php?' + new URLSearchParams({action:'dbrk2_item_detail', type, id}), {credentials:'same-origin'});
+          const ji = await r.json();
+          if (!ji || !ji.success) return;
+
+          const item = ji.data;
+          // Point "Open ↗" to canonical/fallback
+          const openA = document.querySelector('.dbrk2-dbar a');
+          if (openA && item.link) openA.href = item.link;
+
+          const card = document.createElement('div'); card.className = 'dbrk2-card';
+          const box  = document.createElement('div'); box.className  = 'dbrk2-box';
+          card.innerHTML = '<h4 style="margin:0 0 6px;">Details</h4>'; card.appendChild(box);
+
+          function row(label, inputEl){
+            const wrap = document.createElement('div'); wrap.className='dbrk2-row'; wrap.style.alignItems='center';
+            const L = document.createElement('div'); L.textContent = label + ':'; L.style.width='120px'; L.style.opacity='.8';
+            const R = document.createElement('div'); R.style.flex='1'; R.appendChild(inputEl);
+            wrap.appendChild(L); wrap.appendChild(R); box.appendChild(wrap);
+          }
+
+          // Title
+          const ttl = document.createElement('input'); ttl.className='dbrk2-input'; ttl.style.width='100%'; ttl.value = item.title || ('#' + id);
+          row('Title', ttl);
+
+          // Description
+          const desc = document.createElement('textarea'); desc.className='dbrk2-input'; desc.style.width='100%'; desc.style.minHeight='110px'; desc.value = item.content || '';
+          row('Description', desc);
+
+          // Type-specific
+          let amountInp, stageInp, companyInp, propertyInp, contactInp, dueInp, doneChk, emailInp, phoneInp;
+
+          if (type === 'deals') {
+            amountInp = document.createElement('input'); amountInp.className='dbrk2-input'; amountInp.placeholder='$0'; amountInp.value = (item.amount ?? '') + '';
+            stageInp  = document.createElement('input'); stageInp.className='dbrk2-input'; stageInp.placeholder='Stage'; stageInp.value = item.stage || '';
+            companyInp  = document.createElement('input'); companyInp.type='number'; companyInp.className='dbrk2-input'; companyInp.placeholder='Company ID';  companyInp.value = item.company_id || '';
+            propertyInp = document.createElement('input'); propertyInp.type='number'; propertyInp.className='dbrk2-input'; propertyInp.placeholder='Property ID'; propertyInp.value = item.property_id || '';
+            contactInp  = document.createElement('input'); contactInp.type='number'; contactInp.className='dbrk2-input'; contactInp.placeholder='Contact ID';  contactInp.value = item.contact_id || '';
+            row('Amount',   amountInp);
+            row('Stage',    stageInp);
+            row('Company',  companyInp);
+            row('Property', propertyInp);
+            row('Contact',  contactInp);
+          }
+
+          if (type === 'tasks') {
+            dueInp  = document.createElement('input'); dueInp.type='datetime-local'; dueInp.className='dbrk2-input'; dueInp.value = item.due_at || '';
+            doneChk = document.createElement('input'); doneChk.type='checkbox'; doneChk.checked = !!item.done;
+            row('Due at', dueInp);
+            const doneWrap = document.createElement('div'); doneWrap.appendChild(doneChk); row('Done', doneWrap);
+          }
+
+          if (['contacts','companies','properties'].includes(type)) {
+            emailInp = document.createElement('input'); emailInp.type='email'; emailInp.className='dbrk2-input'; emailInp.placeholder='name@example.com'; emailInp.value = item.email || '';
+            phoneInp = document.createElement('input'); phoneInp.type='text';  phoneInp.className='dbrk2-input'; phoneInp.placeholder='(###) ###-####'; phoneInp.value = item.phone || '';
+            row('Email', emailInp);
+            row('Phone', phoneInp);
+          }
+
+          const save = document.createElement('button'); save.className='dbrk2-btn'; save.textContent='Save';
+          const saveRow = document.createElement('div'); saveRow.style.marginTop='8px'; saveRow.appendChild(save); box.appendChild(saveRow);
+
+          save.onclick = async ()=>{
+            const fd = new FormData();
+            fd.append('action','dbrk2_item_save');
+            fd.append('type', type);
+            fd.append('id',   id);
+            fd.append('title',   ttl.value || '');
+            fd.append('content', desc.value || '');
+            if (type === 'deals') {
+              if (amountInp)  fd.append('amount', amountInp.value || '');
+              if (stageInp)   fd.append('stage',  stageInp.value || '');
+              if (companyInp) fd.append('company_id',  companyInp.value || '');
+              if (propertyInp)fd.append('property_id', propertyInp.value || '');
+              if (contactInp) fd.append('contact_id',  contactInp.value || '');
+            }
+            if (type === 'tasks') {
+              if (dueInp)  fd.append('due_at', dueInp.value || '');
+              if (doneChk) fd.append('done',   doneChk.checked ? '1' : '0');
+            }
+            if (['contacts','companies','properties'].includes(type)) {
+              if (emailInp) fd.append('email', emailInp.value || '');
+              if (phoneInp) fd.append('phone', phoneInp.value || '');
+            }
+            const rs = await fetch('/wp-admin/admin-ajax.php', {method:'POST', credentials:'same-origin', body:fd});
+            const js = await rs.json();
+            if (js && js.success) {
+              // Optional toast
+              console.log('Saved ✅');
+            } else {
+              alert('Save failed');
+            }
+          };
+
+          // Mount at top of drawer body
+          (document.querySelector('.dbrk2-dbody') || document.body).prepend(card);
+        })();
         // Relationships (deals)
         if(type==='deals'){
           const rcard=document.createElement('div'); rcard.className='dbrk2-card'; rcard.innerHTML='<h4>Relationships</h4>';
