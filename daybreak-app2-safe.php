@@ -1,16 +1,25 @@
 <?php
 /*
 Plugin Name: Daybreak App 2 (Safe Dashboard)
-Description: Self-contained Dashboard + Deals Kanban + Lists for Daybreak CRM using admin-ajax only. No global footer hooks.
-Version: 0.3.0
+Description: Self-contained Dashboard + Deals Kanban + Lists + Files for Daybreak CRM using admin-ajax only. No global footer hooks.
+Version: 0.3.1
 Author: ChatGPT
 */
 if (!defined('ABSPATH')) exit;
 
 class Daybreak_App2_Safe {
+  // Helper to build a canonical or fallback record link
+  private function record_link($type,$id){
+    $pl = get_permalink($id);
+    if ($pl && filter_var($pl, FILTER_VALIDATE_URL)) return $pl;
+    return add_query_arg(['dbrk2'=>'record','type'=>$type,'id'=>$id], home_url('/'));
+  }
   public function __construct() {
     add_shortcode('daybreak_app2', [$this,'shortcode']);
     add_action('init', [$this,'maybe_register_activity']);
+
+  // Fallback record page
+  add_action('template_redirect', [$this,'render_record_page']);
 
     // admin-ajax endpoints (logged-in only)
     add_action('wp_ajax_dbrk2_table',        [$this,'ajax_table']);
@@ -26,6 +35,14 @@ class Daybreak_App2_Safe {
     add_action('wp_ajax_dbrk2_scratch_set',  [$this,'ajax_scratch_set']);
     add_action('wp_ajax_dbrk2_note_add',     [$this,'ajax_note_add']);
     add_action('wp_ajax_dbrk2_notes_recent', [$this,'ajax_notes_recent']);
+
+    // Files
+    add_action('wp_ajax_dbrk2_file_upload',  [$this,'ajax_file_upload']);
+    add_action('wp_ajax_dbrk2_file_list',    [$this,'ajax_file_list']);
+    add_action('wp_ajax_dbrk2_file_delete',  [$this,'ajax_file_delete']);
+    // Record Drawer endpoints
+    add_action('wp_ajax_dbrk2_item',       [$this,'ajax_item']);
+    add_action('wp_ajax_dbrk2_notes_for',  [$this,'ajax_notes_for']);
   }
 
   public function maybe_register_activity(){
@@ -62,6 +79,7 @@ class Daybreak_App2_Safe {
       $row=['id'=>$p->ID,'title'=>get_the_title($p)];
       if($type==='deals'){ $st=wp_get_post_terms($p->ID,'dbrk_stage',['fields'=>'names']); $row['stage']=$st?$st[0]:null; }
       if($type==='tasks'){ $row['done']=(bool)get_post_meta($p->ID,'dbrk_done',true); $row['due_at']=get_post_meta($p->ID,'dbrk_due_at',true); }
+      $row['link'] = $this->record_link($type, $p->ID);
       $items[]=$row;
     }
     wp_send_json_success(['items'=>$items],200);
@@ -76,7 +94,7 @@ class Daybreak_App2_Safe {
         foreach($terms as $t) $out[]=$t->name;
       }
     }
-    if(!$out){ // fallback default ladder
+    if(!$out){
       $out=['Prospect','Qualification','Tour','Negotiation','Under LOI','Under Contract','Closed'];
     }
     wp_send_json_success(['stages'=>$out],200);
@@ -149,7 +167,7 @@ class Daybreak_App2_Safe {
     if(!$id||is_wp_error($id)) wp_send_json_error(['error'=>'create_failed'],500);
     $lt=sanitize_key($_POST['link_type']??''); $lid=intval($_POST['link_id']??0);
     if(in_array($lt,['contacts','companies','properties','deals'],true) && $lid){
-      update_post_meta($id,'dbrk_link_key',$lt.':'.$lid);
+      update_post_meta($id,'dbrk_link_key',$lt.':'.$lid); // note meta (separate from files)
     }
     wp_send_json_success(['id'=>$id],200);
   }
@@ -169,6 +187,256 @@ class Daybreak_App2_Safe {
       ];
     }
     wp_send_json_success(['items'=>$items],200);
+  }
+
+  // --- Record Drawer endpoints ---
+  public function ajax_item(){
+    if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+    $type=sanitize_key($_GET['type']??''); $id=intval($_GET['id']??0);
+    $pt=$this->pt($type);
+    if(!$pt || !$id || get_post_type($id)!==$pt) wp_send_json_error(['error'=>'bad_request'],400);
+
+    $data=['id'=>$id,'type'=>$type,'title'=>get_the_title($id)];
+    $data['link'] = $this->record_link($type, $id);
+    wp_send_json_success($data,200);
+  }
+
+  // Fallback record page renderer
+  public function render_record_page(){
+    if (!isset($_GET['dbrk2']) || $_GET['dbrk2'] !== 'record') return;
+    if (!is_user_logged_in()) { auth_redirect(); exit; }
+
+    $type = sanitize_key($_GET['type'] ?? '');
+    $id   = intval($_GET['id'] ?? 0);
+    $pt   = $this->pt($type);
+    if (!$pt || !$id || get_post_type($id) !== $pt) {
+      status_header(404); wp_die('Record not found'); 
+    }
+    $title = get_the_title($id);
+
+    // Minimal standalone HTML (no theme dependency)
+    ?>
+    <!doctype html>
+    <meta charset="utf-8">
+    <title><?php echo esc_html($title); ?> · Daybreak</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+      body{font:14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:20px; color:#111}
+      .wrap{max-width:980px; margin:0 auto}
+      .card{background:#fff;border:1px solid #eee;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.06);margin:12px 0}
+      .card h3{margin:0;padding:10px 12px;border-bottom:1px solid #eee;font:600 14px system-ui;background:#fafafa;border-radius:10px 10px 0 0}
+      .box{padding:12px}
+      .row{display:flex;gap:8px;align-items:center;margin:6px 0}
+      .btn{all:unset;cursor:pointer;padding:8px 12px;border:1px solid #e1e1e1;border-radius:8px}
+      .input{padding:8px 10px;border:1px solid #e1e1e1;border-radius:8px}
+      .muted{color:#666;font-size:12px}
+      a{color:#1a56db;text-decoration:none} a:hover{text-decoration:underline}
+    </style>
+    <div class="wrap">
+      <h1 style="margin:0 0 8px"><?php echo esc_html($title); ?></h1>
+      <div class="muted">Type: <?php echo esc_html($type); ?> · ID #<?php echo $id; ?></div>
+
+      <div id="stageCard" class="card" style="display:none">
+        <h3>Stage</h3>
+        <div class="box">
+          <div class="row">
+            <select id="stageSel" class="input"></select>
+            <button id="stageSave" class="btn">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Files</h3>
+        <div class="box">
+          <div id="filesList"></div>
+          <div id="filesDrop" class="row" style="border:2px dashed #cbd5ff;border-radius:10px;padding:16px;justify-content:center;cursor:pointer;margin-top:8px">Drop files here or click</div>
+          <input id="filesChooser" type="file" multiple style="display:none">
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Notes</h3>
+        <div class="box">
+          <textarea id="noteTa" class="input" style="width:100%;min-height:90px" placeholder="Add a note…"></textarea>
+          <div><button id="noteAdd" class="btn" style="margin-top:8px">Add Note</button></div>
+          <div id="notesList" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    (function(){
+      const type = <?php echo json_encode($type); ?>;
+      const id   = <?php echo json_encode($id); ?>;
+
+      // Stage (deals only)
+      const stageCard=document.getElementById('stageCard');
+      const stageSel=document.getElementById('stageSel');
+      const stageSave=document.getElementById('stageSave');
+
+      if(type==='deals'){
+        stageCard.style.display='block';
+        fetch('/wp-admin/admin-ajax.php?action=dbrk2_stages')
+          .then(r=>r.json()).then(j=>{
+            const stages=(j.data&&j.data.stages)||j.stages||[];
+            stages.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; stageSel.appendChild(o); });
+            // preload current
+            fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_item',type,id}))
+              .then(r=>r.json()).then(j=>{
+                const cur=(j.data&&j.data.stage)||j.stage||'';
+                [...stageSel.options].forEach(o=>{ if(o.value===cur) o.selected=true; });
+              });
+          });
+        stageSave.onclick=()=>{ fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_stage',id,stage:stageSel.value})).then(()=>alert('Stage updated ✅')); };
+      }
+
+      // Files
+      const list=document.getElementById('filesList');
+      const drop=document.getElementById('filesDrop');
+      const chooser=document.getElementById('filesChooser');
+
+      function renderFiles(items){
+        list.innerHTML='';
+        if(!items.length){ list.textContent='No files.'; return; }
+        items.forEach(x=>{
+          const row=document.createElement('div'); row.className='row'; row.style.justifyContent='space-between';
+          const a=document.createElement('a'); a.href=x.url; a.target='_blank'; a.textContent=x.title||('File #'+x.id);
+          const del=document.createElement('button'); del.className='btn'; del.textContent='Delete';
+          del.onclick=()=>fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_file_delete',id:x.id})).then(()=>row.remove());
+          row.appendChild(a); row.appendChild(del); list.appendChild(row);
+        });
+      }
+      function refreshFiles(){
+        fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_file_list',link_type:type,link_id:id}))
+          .then(r=>r.json()).then(j=>{ const items=(j.data&&j.data.items)||j.items||[]; renderFiles(items); });
+      }
+      refreshFiles();
+
+      drop.onclick=()=>chooser.click();
+      chooser.addEventListener('change', ()=>{
+        const files=[...chooser.files];
+        (async()=>{
+          for(const f of files){
+            const fd=new FormData();
+            fd.append('action','dbrk2_file_upload'); fd.append('file',f);
+            fd.append('link_type',type); fd.append('link_id',id);
+            await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+          }
+          chooser.value=''; refreshFiles();
+        })();
+      });
+      drop.addEventListener('dragover',e=>{ e.preventDefault(); drop.style.background='#f5f7ff'; });
+      drop.addEventListener('dragleave',()=>{ drop.style.background=''; });
+      drop.addEventListener('drop',e=>{
+        e.preventDefault(); drop.style.background='';
+        const files=[...e.dataTransfer.files];
+        (async()=>{
+          for(const f of files){
+            const fd=new FormData();
+            fd.append('action','dbrk2_file_upload'); fd.append('file',f);
+            fd.append('link_type',type); fd.append('link_id',id);
+            await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+          }
+          refreshFiles();
+        })();
+      });
+
+      // Notes
+      const noteTa=document.getElementById('noteTa');
+      const noteAdd=document.getElementById('noteAdd');
+      const notesList=document.getElementById('notesList');
+
+      function renderNotes(items){
+        notesList.innerHTML='';
+        if(!items.length){ notesList.textContent='No notes yet.'; return; }
+        items.forEach(n=>{
+          const row=document.createElement('div');
+          row.innerHTML='<div style="font:600 13px system-ui">'+(n.title||'Note')+'</div>'
+                       +'<div class="muted" style="margin:2px 0 6px">'+(n.date||'')+'</div>'
+                       +'<div>'+(n.excerpt||'')+'</div>';
+          notesList.appendChild(row);
+        });
+      }
+      function refreshNotes(){
+        fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_notes_for',type,id}))
+          .then(r=>r.json()).then(j=>{ const items=(j.data&&j.data.items)||j.items||[]; renderNotes(items); });
+      }
+      refreshNotes();
+
+      noteAdd.onclick=()=>{
+        const text=(noteTa.value||'').trim(); if(!text) return;
+        const fd=new FormData();
+        fd.append('action','dbrk2_note_add'); fd.append('text',text);
+        fd.append('link_type',type); fd.append('link_id',id);
+        fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd}).then(()=>{ noteTa.value=''; refreshNotes(); });
+      };
+    })();
+    </script>
+    <?php
+    exit;
+  }
+
+  public function ajax_notes_for(){
+    if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+    $type=sanitize_key($_GET['type']??''); $id=intval($_GET['id']??0);
+    if(!in_array($type,['contacts','companies','properties','deals'],true) || !$id){
+      wp_send_json_error(['error'=>'bad_request'],400);
+    }
+    $key=$type.':'.$id;
+    $q=new WP_Query([
+      'post_type'=>'dbrk_activity','post_status'=>'publish','posts_per_page'=>10,'no_found_rows'=>true,
+      'meta_query'=>[['key'=>'dbrk_link_key','value'=>$key]],
+      'orderby'=>'date','order'=>'DESC'
+    ]);
+    $items=[];
+    foreach($q->posts as $p){
+      $items[]=[
+        'id'=>$p->ID,
+        'title'=>get_the_title($p),
+        'excerpt'=>wp_trim_words(wp_strip_all_tags($p->post_content),24,'…'),
+        'date'=>get_the_date('', $p)
+      ];
+    }
+    wp_send_json_success(['items'=>$items],200);
+  }
+
+  // --- File AJAX endpoints ---
+  private function link_key($type,$id){ return $type.':'.intval($id); }
+  private function valid_link_type($t){ return in_array($t,['contacts','companies','properties','deals'],true); }
+
+  public function ajax_file_upload(){
+    if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+    $type=sanitize_key($_REQUEST['link_type']??''); $id=intval($_REQUEST['link_id']??0);
+    if(!$this->valid_link_type($type)||!$id) wp_send_json_error(['error'=>'bad_request'],400);
+    if(empty($_FILES['file']['tmp_name'])) wp_send_json_error(['error'=>'no_file'],400);
+    require_once(ABSPATH.'wp-admin/includes/file.php');
+    require_once(ABSPATH.'wp-admin/includes/media.php');
+    require_once(ABSPATH.'wp-admin/includes/image.php');
+    $aid=media_handle_upload('file',0);
+    if(is_wp_error($aid)) wp_send_json_error(['error'=>$aid->get_error_message()],500);
+    update_post_meta($aid,'dbrk2_link_key',$this->link_key($type,$id));
+    wp_send_json_success(['id'=>$aid,'title'=>get_the_title($aid),'url'=>wp_get_attachment_url($aid)],200);
+  }
+
+  public function ajax_file_list(){
+    if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+    $type=sanitize_key($_GET['link_type']??''); $id=intval($_GET['link_id']??0);
+    if(!$this->valid_link_type($type)||!$id) wp_send_json_error(['error'=>'bad_request'],400);
+    $q=new WP_Query([
+      'post_type'=>'attachment','post_status'=>'inherit','posts_per_page'=>50,'no_found_rows'=>true,
+      'meta_query'=>[['key'=>'dbrk2_link_key','value'=>$this->link_key($type,$id)]],
+      'orderby'=>'date','order'=>'DESC'
+    ]);
+    $items=[]; foreach($q->posts as $p){ $items[]=['id'=>$p->ID,'title'=>get_the_title($p),'url'=>wp_get_attachment_url($p->ID)]; }
+    wp_send_json_success(['items'=>$items],200);
+  }
+
+  public function ajax_file_delete(){
+    if(!is_user_logged_in()) wp_send_json_error(['error'=>'forbidden'],403);
+    $att=intval($_GET['id']??0); if(!$att) wp_send_json_error(['error'=>'bad_request'],400);
+    wp_delete_attachment($att,true);
+    wp_send_json_success(['deleted'=>true],200);
   }
 
   /* ------------ Shortcode UI ------------ */
@@ -191,6 +459,7 @@ class Daybreak_App2_Safe {
       .dbrk2-box{padding:10px}
       .dbrk2-row{display:flex;gap:8px;align-items:center;margin:6px 0}
       .dbrk2-input{padding:8px 10px;border:1px solid #e1e1e1;border-radius:8px}
+      .dbrk2-muted{color:#666;font:12px system-ui}
 
       /* Kanban */
       .dbrk2-grid-kan{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
@@ -201,6 +470,10 @@ class Daybreak_App2_Safe {
 
       table.dbrk2-table{width:100%;border-collapse:collapse}
       table.dbrk2-table td{padding:8px 10px;border-bottom:1px solid #f0f0f0}
+  /* Drawer */
+  .dbrk2-drawer{position:fixed; top:0; right:0; bottom:0; width:420px; background:#fff; border-left:1px solid #eee; box-shadow:-12px 0 30px rgba(0,0,0,.06); z-index:99999; display:flex; flex-direction:column}
+  .dbrk2-dbar{display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:1px solid #eee; background:#fafafa}
+  .dbrk2-dbody{flex:1; overflow:auto; padding:12px}
     </style>
 
     <div id="dbrk2-app" class="dbrk2-shell">
@@ -208,20 +481,125 @@ class Daybreak_App2_Safe {
         <input id="dbrk2-gs" placeholder="Search contacts, companies, properties, deals…">
         <button id="dbrk2-gsbtn" class="dbrk2-btn">Search</button>
       </div>
+
       <div class="dbrk2-tabs">
         <button class="dbrk2-tab active" data-tab="dash">Dashboard</button>
         <button class="dbrk2-tab" data-tab="deals">Deals</button>
         <button class="dbrk2-tab" data-tab="lists">Lists</button>
+        <button class="dbrk2-tab" data-tab="files">Files</button>
       </div>
+
       <div class="dbrk2-body">
         <div id="tab-dash"></div>
         <div id="tab-deals" style="display:none"></div>
         <div id="tab-lists" style="display:none"></div>
+        <div id="tab-files" style="display:none"></div>
       </div>
     </div>
 
     <script>
     (function(){
+      function closeDrawer(){ const ex=document.querySelector('.dbrk2-drawer'); if(ex) ex.remove(); }
+      async function openDrawer(type,id,title){
+  closeDrawer();
+  const wrap=document.createElement('div'); wrap.className='dbrk2-drawer';
+  const bar=document.createElement('div'); bar.className='dbrk2-dbar';
+  const h=document.createElement('div'); h.style.font='600 14px system-ui'; h.textContent=title||('#'+id);
+  const x=document.createElement('button'); x.className='dbrk2-btn'; x.textContent='×'; x.onclick=closeDrawer;
+  const go=document.createElement('a'); go.className='dbrk2-btn'; go.textContent='Open ↗'; go.target='_blank';
+  bar.appendChild(h); bar.insertBefore(go, x); bar.appendChild(x); wrap.appendChild(bar);
+
+        const body=document.createElement('div'); body.className='dbrk2-dbody'; wrap.appendChild(body);
+        document.body.appendChild(wrap);
+
+        // Load header details
+  const ir=await fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_item',type,id}));
+  const item=ir.ok ? ((await ir.json()).data||{}) : {id,type,title};
+  const page = (item && (item.link || item.url)) || ('/?dbrk2=record&type='+type+'&id='+id);
+  go.href = page;
+
+        // Stage changer (deals)
+        if(type==='deals'){
+          const row=document.createElement('div'); row.className='dbrk2-row';
+          const lab=document.createElement('div'); lab.textContent='Stage:'; row.appendChild(lab);
+          const sel=document.createElement('select'); sel.className='dbrk2-input';
+          const sr=await fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_stages'}));
+          const sj=sr.ok ? await sr.json() : {data:{stages:[]}};
+          const stages=(sj.data&&sj.data.stages)||sj.stages||[];
+          stages.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; if((item.stage||'')===s) o.selected=true; sel.appendChild(o); });
+          const save=document.createElement('button'); save.className='dbrk2-btn'; save.textContent='Save';
+          save.onclick=async()=>{ await fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_stage',id,stage:sel.value})); alert('Stage updated ✅'); };
+          row.appendChild(sel); row.appendChild(save); body.appendChild(row);
+        }
+
+        // Files (reuse working endpoints)
+        const fcard=document.createElement('div'); fcard.className='dbrk2-card'; fcard.innerHTML='<h4>Files</h4>'; const fbox=document.createElement('div'); fbox.className='dbrk2-box'; fcard.appendChild(fbox); body.appendChild(fcard);
+        const list=document.createElement('div'); fbox.appendChild(list);
+        const drop=document.createElement('div'); drop.textContent='Drop files here or click'; Object.assign(drop.style,{border:'2px dashed #cbd5ff',borderRadius:'10px',padding:'12px',textAlign:'center',cursor:'pointer',marginTop:'8px'}); fbox.appendChild(drop);
+        const chooser=document.createElement('input'); chooser.type='file'; chooser.multiple=true; chooser.style.display='none'; fbox.appendChild(chooser);
+        drop.onclick=()=>chooser.click();
+
+        async function refreshFiles(){
+          list.innerHTML='';
+          const url='/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_file_list',link_type:type,link_id:id});
+          const r=await fetch(url); const j=r.ok?await r.json():{data:{items:[]}}; const items=(j.data&&j.data.items)||j.items||[];
+          if(!items.length){ list.textContent='No files.'; return; }
+          items.forEach(x=>{
+            const row=document.createElement('div'); row.className='dbrk2-row'; row.style.justifyContent='space-between';
+            const a=document.createElement('a'); a.href=x.url; a.target='_blank'; a.textContent=x.title||('File #'+x.id);
+            const del=document.createElement('button'); del.className='dbrk2-btn'; del.textContent='Delete';
+            del.onclick=async()=>{ await fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_file_delete',id:x.id})); row.remove(); };
+            row.appendChild(a); row.appendChild(del); list.appendChild(row);
+          });
+        }
+        chooser.addEventListener('change', async ()=>{
+          for(const f of chooser.files){
+            const fd=new FormData(); fd.append('action','dbrk2_file_upload'); fd.append('file',f);
+            fd.append('link_type',type); fd.append('link_id',id);
+            await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+          }
+          chooser.value=''; refreshFiles();
+        });
+        drop.addEventListener('dragover',e=>{ e.preventDefault(); drop.style.background='#f5f7ff'; });
+        drop.addEventListener('dragleave',()=>{ drop.style.background=''; });
+        drop.addEventListener('drop', async e=>{
+          e.preventDefault(); drop.style.background='';
+          for(const f of e.dataTransfer.files){
+            const fd=new FormData(); fd.append('action','dbrk2_file_upload'); fd.append('file',f);
+            fd.append('link_type',type); fd.append('link_id',id);
+            await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+          }
+          refreshFiles();
+        });
+        refreshFiles();
+
+        // Notes
+        const ncard=document.createElement('div'); ncard.className='dbrk2-card'; ncard.innerHTML='<h4>Notes</h4>'; const nbox=document.createElement('div'); nbox.className='dbrk2-box'; ncard.appendChild(nbox); body.appendChild(ncard);
+        const noteTa=document.createElement('textarea'); noteTa.style.width='100%'; noteTa.style.minHeight='90px'; noteTa.placeholder='Add a note…'; nbox.appendChild(noteTa);
+        const nbtn=document.createElement('button'); nbtn.className='dbrk2-btn'; nbtn.textContent='Add Note'; nbtn.style.marginTop='8px'; nbox.appendChild(nbtn);
+        const nlist=document.createElement('div'); nlist.style.marginTop='8px'; nbox.appendChild(nlist);
+
+        async function refreshNotes(){
+          nlist.innerHTML='';
+          const r=await fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_notes_for',type,id}));
+          const j=r.ok?await r.json():{data:{items:[]}}; const items=(j.data&&j.data.items)||j.items||[];
+          if(!items.length){ nlist.textContent='No notes yet.'; return; }
+          items.forEach(n=>{
+            const row=document.createElement('div');
+            row.innerHTML=`<div style="font:600 13px system-ui">${n.title}</div><div class="dbrk2-muted" style="margin:2px 0 6px">${n.date}</div><div>${n.excerpt}</div>`;
+            nlist.appendChild(row);
+          });
+        }
+        nbtn.onclick=async()=>{
+          const text=(noteTa.value||'').trim(); if(!text) return;
+          const fd=new FormData(); fd.append('action','dbrk2_note_add'); fd.append('text',text); fd.append('link_type',type); fd.append('link_id',id);
+          await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+          noteTa.value=''; refreshNotes();
+        };
+        refreshNotes();
+      }
+      const TABS=['dash','deals','lists','files'];
+
       const ajax=(action,params,method='GET',body=null)=>{
         const url='/wp-admin/admin-ajax.php?'+new URLSearchParams({action,...(method==='GET'?(params||{}):{})});
         return fetch(url, method==='GET'?{}:{method, body});
@@ -229,7 +607,10 @@ class Daybreak_App2_Safe {
 
       function switchTab(name){
         document.querySelectorAll('.dbrk2-tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
-        ['dash','deals','lists'].forEach(t=>{ document.getElementById('tab-'+t).style.display=(t===name)?'block':'none'; });
+        TABS.forEach(t=>{
+          const el=document.getElementById('tab-'+t);
+          if (el) el.style.display=(t===name)?'block':'none';
+        });
       }
 
       /* ------- Dashboard ------- */
@@ -272,7 +653,7 @@ class Daybreak_App2_Safe {
         loadActiveDeals();
 
         // Recent notes
-        const c5=document.createElement('div'); c5.className='dbrk2-card'; c5.innerHTML='<h4>Recent Notes</h4>'; const b5=document.createElement('div'); b5.className='dbrk2-box'; c5.appendChild(b5); grid.appendChild(c5);
+        const c5=document.createElement('div'); c5.className='dbrk2-card'; c5.innerHTML='<h4>Recent Notes</h4>'; const b5=document.createElement('div'); c5.appendChild(b5); b5.className='dbrk2-box'; grid.appendChild(c5);
         async function loadRecent(){ const r=await ajax('dbrk2_notes_recent'); const j=r.ok?await r.json():{data:{items:[]}}; const items=(j.data&&j.data.items)||j.items||[]; b5.innerHTML=''; if(!items.length){ b5.textContent='No notes yet.'; return; } items.forEach(n=>{ const row=document.createElement('div'); row.innerHTML=`<div style="font:600 13px system-ui">${n.title}</div><div class="dbrk2-muted" style="margin:2px 0 6px">${n.date}</div><div>${n.excerpt}</div>`; b5.appendChild(row); }); }
         loadRecent();
       }
@@ -287,12 +668,96 @@ class Daybreak_App2_Safe {
         const grid=document.createElement('div'); grid.className='dbrk2-grid-kan'; host.appendChild(grid);
         const lanes={}; stages.forEach(s=>{ const col=document.createElement('div'); col.className='dbrk2-col'; col.innerHTML=`<h4>${s}</h4>`; const lane=document.createElement('div'); lane.className='dbrk2-lane'; lane.dataset.stage=s; col.appendChild(lane); grid.appendChild(col); lanes[s]=lane; });
 
-        items.forEach(d=>{ const s=(d.stage||'').toLowerCase(); const tgt=stages.find(x=>x.toLowerCase()===s) || stages[0]; const lane=lanes[tgt]; const card=document.createElement('div'); card.className='dbrk2-cardd'; card.textContent=d.title; card.draggable=true; card.dataset.id=d.id; (lane||lanes[stages[0]]).appendChild(card); });
+        items.forEach(d=>{ const s=(d.stage||'').toLowerCase(); const tgt=stages.find(x=>x.toLowerCase()===s) || stages[0]; const lane=lanes[tgt]; const card=document.createElement('div'); card.className='dbrk2-cardd'; card.textContent=d.title; card.draggable=true; card.dataset.id=d.id;
+          const link=document.createElement('a');
+          link.href = d.link || ('/?dbrk2=record&type=deals&id='+d.id);
+          link.target='_blank';
+          link.textContent='↗';
+          link.style.float='right';
+          link.style.marginLeft='6px';
+          link.style.textDecoration='none';
+          link.onclick=(e)=>e.stopPropagation();
+          card.appendChild(link);
+          (lane||lanes[stages[0]]).appendChild(card);
+          card.addEventListener('dblclick', ()=> openDrawer('deals', d.id, d.title));
+        });
 
         let drag=null;
         host.addEventListener('dragstart',e=>{ const c=e.target.closest('.dbrk2-cardd'); if(!c) return; drag=c; });
         host.addEventListener('dragover',e=>{ if(e.target.closest('.dbrk2-lane')) e.preventDefault(); });
         host.addEventListener('drop',async e=>{ const lane=e.target.closest('.dbrk2-lane'); if(!lane||!drag) return; e.preventDefault(); lane.appendChild(drag); const res=await ajax('dbrk2_stage',{id:drag.dataset.id,stage:lane.dataset.stage}); alert(res.ok?'Stage updated ✅':'Save failed ❌'); });
+      }
+
+      /* ------- Files ------- */
+      async function loadFiles(){
+        const host=document.getElementById('tab-files'); host.innerHTML='';
+
+        // Controls row
+        const row=document.createElement('div'); row.className='dbrk2-row'; host.appendChild(row);
+        const typeSel=document.createElement('select'); typeSel.className='dbrk2-input';
+        ['contacts','companies','properties','deals'].forEach(t=>{ const o=document.createElement('option'); o.value=t; o.textContent=t[0].toUpperCase()+t.slice(1); typeSel.appendChild(o); });
+        const q=document.createElement('input'); q.className='dbrk2-input'; q.placeholder='Find record…'; q.type='search';
+        const findBtn=document.createElement('button'); findBtn.className='dbrk2-btn'; findBtn.textContent='Find';
+        const pick=document.createElement('select'); pick.className='dbrk2-input'; pick.style.minWidth='240px';
+        row.appendChild(typeSel); row.appendChild(q); row.appendChild(findBtn); row.appendChild(pick);
+
+        // List + Drop
+        const list=document.createElement('div'); list.className='dbrk2-box'; host.appendChild(list);
+        const drop=document.createElement('div'); drop.textContent='Drop files here or click'; Object.assign(drop.style,{border:'2px dashed #cbd5ff',borderRadius:'10px',padding:'20px',textAlign:'center',cursor:'pointer'}); host.appendChild(drop);
+        const chooser=document.createElement('input'); chooser.type='file'; chooser.multiple=true; chooser.style.display='none'; host.appendChild(chooser);
+        drop.onclick=()=>chooser.click();
+
+        async function searchRecords(){
+          pick.innerHTML='';
+          const r=await fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_table',type:typeSel.value,per_page:50,q:q.value||''}));
+          const j=r.ok?await r.json():{data:{items:[]}}; const items=(j.data&&j.data.items)||j.items||[];
+          items.forEach(x=>{ const o=document.createElement('option'); o.value=x.id; o.textContent=x.title||('#'+x.id); pick.appendChild(o); });
+          if(items.length) await refresh();
+          else list.textContent='No records found.';
+        }
+        findBtn.onclick=searchRecords; q.addEventListener('keydown',e=>{ if(e.key==='Enter') searchRecords(); });
+        typeSel.onchange=searchRecords;
+
+        async function refresh(){
+          list.innerHTML='';
+          const id=pick.value; if(!id){ list.textContent='Select a record.'; return; }
+          const url='/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_file_list',link_type:typeSel.value,link_id:id});
+          const r=await fetch(url); const j=r.ok?await r.json():{data:{items:[]}}; const items=(j.data&&j.data.items)||j.items||[];
+          if(!items.length){ list.textContent='No files.'; return; }
+          items.forEach(x=>{
+            const row=document.createElement('div'); row.className='dbrk2-row'; row.style.justifyContent='space-between';
+            const a=document.createElement('a'); a.href=x.url; a.target='_blank'; a.textContent=x.title||('File #'+x.id);
+            const del=document.createElement('button'); del.className='dbrk2-btn'; del.textContent='Delete';
+            del.onclick=async()=>{ await fetch('/wp-admin/admin-ajax.php?'+new URLSearchParams({action:'dbrk2_file_delete',id:x.id})); row.remove(); };
+            row.appendChild(a); row.appendChild(del); list.appendChild(row);
+          });
+        }
+
+        chooser.addEventListener('change', async ()=>{
+          const id=pick.value; if(!id) return;
+          for(const f of chooser.files){
+            const fd=new FormData(); fd.append('action','dbrk2_file_upload'); fd.append('file',f);
+            fd.append('link_type',typeSel.value); fd.append('link_id',id);
+            await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+          }
+          chooser.value=''; refresh();
+        });
+
+        drop.addEventListener('dragover',e=>{ e.preventDefault(); drop.style.background='#f5f7ff'; });
+        drop.addEventListener('dragleave',()=>{ drop.style.background=''; });
+        drop.addEventListener('drop', async e=>{
+          e.preventDefault(); drop.style.background='';
+          const id=pick.value; if(!id) return;
+          for(const f of e.dataTransfer.files){
+            const fd=new FormData(); fd.append('action','dbrk2_file_upload'); fd.append('file',f);
+            fd.append('link_type',typeSel.value); fd.append('link_id',id);
+            await fetch('/wp-admin/admin-ajax.php',{method:'POST',body:fd});
+          }
+          refresh();
+        });
+
+        // auto-load so UI isn't empty
+        searchRecords();
       }
 
       /* ------- Lists ------- */
@@ -319,14 +784,23 @@ class Daybreak_App2_Safe {
           if(!items.length){ const tr=document.createElement('tr'); const td=document.createElement('td'); td.textContent='No items found.'; tr.appendChild(td); tb.appendChild(tr); }
           items.forEach(it=>{
             const tr=document.createElement('tr');
+            tr.style.cursor='pointer';
+            tr.addEventListener('dblclick', ()=> openDrawer(sel.value, it.id, it.title));
             const td1=document.createElement('td'); td1.textContent=it.title;
             const td2=document.createElement('td'); td2.textContent=(it.stage||it.due_at||'');
             tr.appendChild(td1); tr.appendChild(td2);
+            const td3=document.createElement('td');
+            const a=document.createElement('a');
+            a.href = it.link || ('/?dbrk2=record&type='+sel.value+'&id='+it.id);
+            a.target = '_blank';
+            a.textContent = 'Open ↗';
+            td3.appendChild(a);
+            tr.appendChild(td3);
             if(sel.value==='tasks'){
-              const td3=document.createElement('td');
+              const td4=document.createElement('td');
               const btn=document.createElement('button'); btn.className='dbrk2-btn'; btn.textContent=it.done?'Undone':'Done';
               btn.onclick=async()=>{ await ajax('dbrk2_task_toggle',{id:it.id}); render(); };
-              td3.appendChild(btn); tr.appendChild(td3);
+              td4.appendChild(btn); tr.appendChild(td4);
             }
             tb.appendChild(tr);
           });
@@ -349,7 +823,7 @@ class Daybreak_App2_Safe {
         render();
       }
 
-      /* ------- Global Search (top) ------- */
+      /* ------- Global Search ------- */
       async function globalSearch(term){
         const out=document.createElement('div'); out.className='dbrk2-box'; out.style.paddingLeft='0';
         const types=[['contacts','Contacts'],['companies','Companies'],['properties','Properties'],['deals','Deals']];
@@ -360,7 +834,6 @@ class Daybreak_App2_Safe {
           const h=document.createElement('div'); h.innerHTML=`<div style="font:600 13px system-ui">${label}</div>`; out.appendChild(h);
           items.forEach(x=>{ const row=document.createElement('div'); row.textContent=x.title+(x.stage?' • '+x.stage:''); out.appendChild(row); });
         }
-        // Simple modal
         const ov=document.createElement('div'); Object.assign(ov.style,{position:'fixed',inset:'0',background:'rgba(0,0,0,.2)',zIndex:'99999'});
         ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
         const box=document.createElement('div'); Object.assign(box.style,{position:'absolute',left:'6vw',right:'6vw',top:'10vh',bottom:'10vh',background:'#fff',border:'1px solid #eee',borderRadius:'12px',overflow:'auto',padding:'12px'});
@@ -376,6 +849,7 @@ class Daybreak_App2_Safe {
           if(name==='dash')  loadDashboard();
           if(name==='deals') loadDeals();
           if(name==='lists') loadLists();
+          if(name==='files') loadFiles();
         });
       });
 
